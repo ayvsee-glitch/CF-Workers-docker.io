@@ -139,4 +139,149 @@ export default {
 			} else {
 				if (url.pathname.startsWith('/v1/')) {
 					url.hostname = 'registry-1.docker.io';
-				} else if
+				} else if (fakePage) {
+					url.hostname = 'hub.docker.com';
+				}
+				if (url.searchParams.get('q')?.includes('library/') && url.searchParams.get('q') != 'library/') {
+					const search = url.searchParams.get('q');
+					url.searchParams.set('q', search.replace('library/', ''));
+				}
+				
+				if (env.DOCKER_USERNAME && env.DOCKER_PASSWORD) {
+					const rawAuth = `${env.DOCKER_USERNAME}:${env.DOCKER_PASSWORD}`;
+					const authValue = typeof btoa !== 'undefined' ? btoa(rawAuth) : Buffer.from(rawAuth).toString('base64');
+					request.headers.set("Authorization", `Basic ${authValue}`);
+				}
+
+				return fetch(new Request(url, request));
+			}
+		}
+
+		if (!/%2F/.test(url.search) && /%3A/.test(url.toString())) {
+			let modifiedUrl = url.toString().replace(/%3A(?=.*?&)/, '%3Alibrary%2F');
+			url = new URL(modifiedUrl);
+		}
+
+		if (url.pathname.includes('/token')) {
+			let token_parameter = {
+				headers: {
+					'Host': 'auth.docker.io',
+					'User-Agent': getReqHeader("User-Agent"),
+					'Accept': getReqHeader("Accept"),
+					'Accept-Language': getReqHeader("Accept-Language"),
+					'Accept-Encoding': getReqHeader("Accept-Encoding"),
+					'Connection': 'keep-alive',
+					'Cache-Control': 'max-age=0'
+				}
+			};
+			return fetch(new Request(auth_url + url.pathname + url.search, request), token_parameter);
+		}
+
+		if (hub_host == 'registry-1.docker.io' && /^\/v2\/[^/]+\/[^/]+\/[^/]+$/.test(url.pathname) && !/^\/v2\/library/.test(url.pathname)) {
+			url.pathname = '/v2/library/' + url.pathname.split('/v2/')[1];
+		}
+
+		if (url.pathname.startsWith('/v2/') && (url.pathname.includes('/manifests/') || url.pathname.includes('/blobs/') || url.pathname.includes('/tags/') || url.pathname.endsWith('/tags/list'))) {
+			let repo = '';
+			const v2Match = url.pathname.match(/^\/v2\/(.+?)(?:\/(manifests|blobs|tags)\/)/);
+			if (v2Match) repo = v2Match[1];
+			
+			if (repo) {
+				const tokenRes = await fetch(`${auth_url}/token?service=registry.docker.io&scope=repository:${repo}:pull`, {
+					headers: {
+						'User-Agent': getReqHeader("User-Agent"),
+						'Accept': getReqHeader("Accept"),
+						'Connection': 'keep-alive'
+					}
+				});
+				const tokenData = await tokenRes.json();
+				const token = tokenData.token;
+				let parameter = {
+					headers: {
+						'Host': hub_host,
+						'User-Agent': getReqHeader("User-Agent"),
+						'Accept': getReqHeader("Accept"),
+						'Connection': 'keep-alive',
+						'Authorization': `Bearer ${token}`
+					},
+					cacheTtl: 3600
+				};
+				if (request.headers.has("X-Amz-Content-Sha256")) {
+					parameter.headers['X-Amz-Content-Sha256'] = getReqHeader("X-Amz-Content-Sha256");
+				}
+				let original_response = await fetch(new Request(url, request), parameter);
+				let original_text = original_response.clone().body;
+				let new_response_headers = new Headers(original_response.headers);
+				
+				if (new_response_headers.get("Www-Authenticate")) {
+					new_response_headers.set("Www-Authenticate", original_response.headers.get("Www-Authenticate").replace(new RegExp(auth_url, 'g'), workers_url));
+				}
+				if (new_response_headers.get("Location")) {
+					return httpHandler(request, new_response_headers.get("Location"), hub_host);
+				}
+				return new Response(original_text, { status: original_response.status, headers: new_response_headers });
+			}
+		}
+
+		if (env.DOCKER_USERNAME && env.DOCKER_PASSWORD) {
+			const rawAuth = `${env.DOCKER_USERNAME}:${env.DOCKER_PASSWORD}`;
+			const authValue = typeof btoa !== 'undefined' ? btoa(rawAuth) : Buffer.from(rawAuth).toString('base64');
+			request.headers.set("Authorization", `Basic ${authValue}`);
+		}
+
+		let parameter = {
+			headers: {
+				'Host': hub_host,
+				'User-Agent': getReqHeader("User-Agent"),
+				'Accept': getReqHeader("Accept"),
+				'Connection': 'keep-alive'
+			},
+			cacheTtl: 3600
+		};
+
+		if (request.headers.has("Authorization")) parameter.headers.Authorization = getReqHeader("Authorization");
+		if (request.headers.has("X-Amz-Content-Sha256")) parameter.headers['X-Amz-Content-Sha256'] = getReqHeader("X-Amz-Content-Sha256");
+
+		let original_response = await fetch(new Request(url, request), parameter);
+		let original_text = original_response.clone().body;
+		let new_response_headers = new Headers(original_response.headers);
+
+		if (new_response_headers.get("Www-Authenticate")) {
+			new_response_headers.set("Www-Authenticate", original_response.headers.get("Www-Authenticate").replace(new RegExp(auth_url, 'g'), workers_url));
+		}
+
+		if (new_response_headers.get("Location")) {
+			return httpHandler(request, new_response_headers.get("Location"), hub_host);
+		}
+
+		return new Response(original_text, { status: original_response.status, headers: new_response_headers });
+	}
+};
+
+function httpHandler(req, pathname, baseHost) {
+	if (req.method === 'OPTIONS' && req.headers.has('access-control-request-headers')) {
+		return new Response(null, PREFLIGHT_INIT);
+	}
+	const reqHdrNew = new Headers(req.headers);
+	reqHdrNew.delete("Authorization");
+	return proxy(newUrl(pathname, 'https://' + baseHost), { method: req.method, headers: reqHdrNew, redirect: 'follow', body: req.body });
+}
+
+async function proxy(urlObj, reqInit) {
+	const res = await fetch(urlObj.href, reqInit);
+	const resHdrNew = new Headers(res.headers);
+	resHdrNew.set('access-control-expose-headers', '*');
+	resHdrNew.set('access-control-allow-origin', '*');
+	resHdrNew.set('Cache-Control', 'max-age=1500');
+	resHdrNew.delete('content-security-policy');
+	resHdrNew.delete('content-security-policy-report-only');
+	resHdrNew.delete('clear-site-data');
+	return new Response(res.body, { status: res.status, headers: resHdrNew });
+}
+
+async function ADD(envadd) {
+	var addtext = envadd.replace(/[	 |"'\r\n]+/g, ',').replace(/,+/g, ',');
+	if (addtext.charAt(0) == ',') addtext = addtext.slice(1);
+	if (addtext.charAt(addtext.length - 1) == ',') addtext = addtext.slice(0, addtext.length - 1);
+	return addtext.split(',');
+}
