@@ -472,9 +472,9 @@ export default {
 					});
 				}
 			} else {
-				// 新增逻辑：/v1/ 路径特殊处理
+				// 新增逻辑：/v1/ 路径特殊处理 —— 强行修正为可接纳 Auth 头验证的官方上游
 				if (url.pathname.startsWith('/v1/')) {
-					url.hostname = 'index.docker.io';
+					url.hostname = 'registry-1.docker.io';
 				} else if (fakePage) {
 					url.hostname = 'hub.docker.com';
 				}
@@ -482,6 +482,13 @@ export default {
 					const search = url.searchParams.get('q');
 					url.searchParams.set('q', search.replace('library/', ''));
 				}
+				
+				// 🔐 核心注入：在搜索及动态请求发出前，强制将本地变量生成的 Basic 认证头写入
+				if (env.DOCKER_USERNAME && env.DOCKER_PASSWORD) {
+					const authValue = btoa(`${env.DOCKER_USERNAME}:${env.DOCKER_PASSWORD}`);
+					request.headers.set("Authorization", `Basic ${authValue}`);
+				}
+
 				const newRequest = new Request(url, request);
 				return fetch(newRequest);
 			}
@@ -586,6 +593,12 @@ export default {
 				});
 				return response;
 			}
+		}
+
+		// 🔐 核心注入：常规回源请求发出前，同样强制代入个人独享凭证
+		if (env.DOCKER_USERNAME && env.DOCKER_PASSWORD) {
+			const authValue = btoa(`${env.DOCKER_USERNAME}:${env.DOCKER_PASSWORD}`);
+			request.headers.set("Authorization", `Basic ${authValue}`);
 		}
 
 		// 构造请求参数
