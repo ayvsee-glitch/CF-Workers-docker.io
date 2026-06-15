@@ -1,13 +1,12 @@
 // _worker.js
 
-// Docker镜像仓库主机地址
+// 默认Docker镜像仓库主机地址
 let hub_host = 'registry-1.docker.io';
 // Docker认证服务器地址
 const auth_url = 'https://auth.docker.io';
 
 let 屏蔽爬虫UA = ['netcraft'];
 
-// 根据主机名选择对应的上游地址
 function routeByHosts(host) {
 	const routes = {
 		"quay": "quay.io",
@@ -23,18 +22,12 @@ function routeByHosts(host) {
 	else return [hub_host, true];
 }
 
-/** @type {RequestInit} */
 const PREFLIGHT_INIT = {
 	headers: new Headers({
 		'access-control-allow-origin': '*',
 		'access-control-allow-methods': 'GET,POST,PUT,PATCH,TRACE,DELETE,HEAD,OPTIONS',
 		'access-control-max-age': '1728000',
 	}),
-}
-
-function makeRes(body, status = 200, headers = {}) {
-	headers['access-control-allow-origin'] = '*'
-	return new Response(body, { status, headers })
 }
 
 function newUrl(urlStr, base) {
@@ -97,10 +90,25 @@ export default {
 	async fetch(request, env, ctx) {
 		const getReqHeader = (key) => request.headers.get(key);
 
+		// 优先读取后台配置的 HUB_URL 变量
+		if (env.HUB_URL) {
+			try {
+				let replacedHost = env.HUB_URL.replace(/^https?:\/\//, '');
+				hub_host = replacedHost;
+			} catch (e) {
+				hub_host = 'registry-1.docker.io';
+			}
+		}
+
 		let url = new URL(request.url);
 		const userAgentHeader = request.headers.get('User-Agent');
 		const userAgent = userAgentHeader ? userAgentHeader.toLowerCase() : "null";
-		if (env.UA) 屏蔽爬虫UA = 屏蔽爬虫UA.concat(await ADD(env.UA));
+		
+		// 修复：安全读取 env.UA，防止未定义时崩溃
+		if (env.UA) {
+			屏蔽爬虫UA = 屏蔽爬虫UA.concat(await ADD(env.UA));
+		}
+		
 		const workers_url = `https://${url.hostname}`;
 
 		const ns = url.searchParams.get('ns');
